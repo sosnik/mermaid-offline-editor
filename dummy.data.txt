@@ -1,0 +1,13 @@
+flowchart TD
+    A33["A Pty Ltd\nACN 123 456 789"]
+    B33{B Pty Ltd\n ACN 010 101 010}
+    A33-- "100%" -->B33
+    Stranger.Pty.Ltd["Stranger Pty Ltd\n ACN 111 111 111"]
+    A33-- "50%" -->Stranger.Pty.Ltd
+    John.Doe((John Doe))
+    John.Doe-- "50%" -->Stranger.Pty.Ltd
+    HoldCo["HoldCo Pty Ltd\n ACN 404 404 404"]
+    HoldCo---A33
+
+    %% styling
+    style HoldCo fill:green,stroke:black,color:white

@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Simple, Auditable and Offline Mermaid.js Editor</title>
+    <style>
+        .editor {
+            width: 35%;
+            height: 100vh;
+            float: left;
+        }
+        .output {
+            width: 65%;
+            height: 100vh;
+            float: left;
+            overflow: auto;
+        }
+        .mermaidError {
+            color: maroon;
+            padding-left: 1em;
+            padding-top: 1em;
+        }
+        #controls ul {
+            padding: 0;
+            margin: 0;
+        }
+        #controls li {
+            display: inline-block;
+        }
+        #controls li:not(:last-child):after {
+            content: ' | ';
+        }
+        #controls a:visited, #controls a:link {
+            color: blue;
+        }
+    </style>
+</head>
+<body>
+    <div class="editor">
+        <div id="controls">
+            <span id="filePicker">Load Data...<input type="file" id="loadData"></span>
+            <button id="saveData">Save Data...</button>
+            <button id="saveSvg">Save SVG</button>
+            <button id="savePng">Save PNG</button>
+            <button id="saveHtml">Save HTML</button>
+            <button id="redraw">Redraw</button>
+            <button id="fullscreen">Fullscreen Diagram</button>
+            <br>
+            <ul>
+                <li><a href="https://mermaid.js.org/syntax/flowchart.html" target="_blank">Syntax</a></li>
+                <li><a href="https://mermaid.live/edit/" target="_blank">   Live Editor</a></li>
+                <li><a href="https://github.com/sosnik/mermaid-offline-editor"> About</a></li>
+            </ul>
+        </div>
+        <textarea id="editor" autofocus spellcheck="false" style="width: 100%; height: 100%;"></textarea>
+    </div>
+    <div class="output"></div>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script>
+        let editor = document.getElementById('editor');
+        let output = document.querySelector('.output');
+        let saveData = document.getElementById('saveData');
+        let loadData = document.getElementById('loadData');
+        let saveSvg = document.getElementById('saveSvg');
+        let savePng = document.getElementById('savePng');
+        let saveHtml = document.getElementById('saveHtml');
+        let redraw = document.getElementById('redraw');
+        let fullscreen = document.getElementById('fullscreen');
+        let filePicker = document.getElementById('filePicker');
+
+        ////// I/O //////
+        if ('showOpenFilePicker' in window) {
+            loadData.remove();
+            let btn = document.createElement('button');
+            btn.innerText = 'Choose File';
+            let loadedFile = document.createElement('span')
+            loadedFile.id = 'loadedFile';
+            loadedFile.innerText = 'No file chosen';
+
+            btn.addEventListener('click', async function() {
+                // Prompt before overwriting
+                if (editor.value.trim() !== '') {
+                    if (!confirm('Are you sure you want to overwrite the current text?')) {
+                        loadData.value = null; // Reset the file input. The event only triggers on a change so will prevent the user from selecting the same file again after cancelling an overwrite. 
+                        return;
+                    }
+                }
+                try {
+                    const [fileHandle] = await window.showOpenFilePicker();
+                    const file = await fileHandle.getFile();
+                    const text = await file.text();
+
+                    editor.value = text;
+                    drawDiagram();
+                    loadedFile.innerText = file.name;
+                    //setIndexedDBItem(`${file.name.split('.').pop()}FileHandle`, fileHandle);
+                    setIndexedDBItem(`dataFileHandle`, fileHandle);
+                } catch (err) {
+                    console.error(err);
+                }
+            });
+
+            filePicker.append(btn, loadedFile);
+        } else {
+            loadData.addEventListener('change', async function(e) {
+                // Prompt before overwriting
+                if (editor.value.trim() !== '') {
+                    if (!confirm('Are you sure you want to overwrite the current text?')) {
+                        loadData.value = null; // Reset the file input. The event only triggers on a change so will prevent the user from selecting the same file again after cancelling an overwrite. 
+                        return;
+                    }
+                }
+                const file = e.target.files[0];
+                const text = await file.text();
+
+                editor.value = text;
+                drawDiagram();
+            });
+        }
+
+        saveData.addEventListener('click', function(e) {
+            const data = editor.value;
+            const blob = new Blob([data], { type: 'text/plain' });
+
+            saveFile(blob, guessFilename(), 'data', e.shiftKey);
+        });
+
+        saveSvg.addEventListener('click', function(e) {
+            const svg = output.querySelector('svg');
+            const svgString = new XMLSerializer().serializeToString(svg);
+            const blob = new Blob([svgString], { type: 'image/svg+xml' });
+            saveFile(blob, guessFilename(), 'svg', e.shiftKey);
+        });
+
+        savePng.addEventListener('click', function(e) {
+            const svg = output.querySelector('svg');
+            svg["font-size"] = "24px";
+            const svgString = new XMLSerializer().serializeToString(svg);
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const img = new Image();
+
+            img.onload = function() {
+                const minSize = 300; // Minimum size for small diagrams
+                canvas.width = Math.max(img.width, minSize);
+                canvas.height = Math.max(img.height, minSize);
+                ctx.drawImage(img, 0, 0);
+                canvas.toBlob(function(blob) {
+                    saveFile(blob, guessFilename(), 'png', e.shiftKey);
+                });
+            };
+
+            img.src = 'data:image/svg+xml;base64,' + btoa(svgString);
+        });
+
+        saveHtml.addEventListener('click', function(e) {
+            const svg = output.querySelector('svg');
+            const svgString = new XMLSerializer().serializeToString(svg);
+            const blob = new Blob([`<html><head><title>${guessFilename() || 'diagram'}</title></head><body><h1>${guessFilename() || 'diagram'}</h1>${svgString}</body></html>`], { type: 'text/html' });
+
+            saveFile(blob, guessFilename(), 'html', e.shiftKey);
+        });
+
+        async function saveFile(blob, filename, extension, saveAs = false) {
+            if ('showSaveFilePicker' in window) {
+                try {
+                    let handle;
+                    const existingHandle = await getIndexedDBItem(`${extension}FileHandle`);
+                    if (existingHandle && !saveAs) {
+                        handle = existingHandle;
+                    } else {
+                        // for image files (pretend HTML is an image in this case) ...
+                        if (['svg', 'png', 'html'].includes(extension)) {
+                            handle = await window.showSaveFilePicker({
+                                id: 'imgOutput',
+                                suggestedName: `${filename?.substring(0, filename.lastIndexOf('.')) || 'diagram'}.${extension}`,
+                                types: [{
+                                    description: 'Diagrams',
+                                    accept: {
+                                        'image/svg+xml': ['.svg'],
+                                        'image/png': ['.png'],
+                                        'image/html': ['.html']
+                                    }
+                                }]
+                            });
+                        } else { 
+                            handle = await window.showSaveFilePicker({
+                                id: 'dataOutput',
+                                suggestedName: filename || 'data.txt',
+                                types: [{
+                                    description: 'Text Files',
+                                    accept: {
+                                        'text/plain': ['.txt', '.dat', '.data', '.mermaid']
+                                    }
+                                }]
+                            });
+                        }
+                        await setIndexedDBItem(`${extension}FileHandle`, handle);
+                    }
+                    const writable = await handle.createWritable();
+                    await writable.write(blob);
+                    await writable.close();
+                } catch (err) {
+                    console.error(err);
+                }            
+            } else {
+                saveFileLegacy(blob, null, extension);
+            }
+        }
+
+        function saveFileLegacy(blob, filename = null, extension = null) {
+            // Try to reuse the filename if a previous datafile was loaded; otherwise prompt the user for a name
+            // Note: we cannot simply leave the `download` attribute empty and let the browser handle the filename, as it will default to the blob/object URL and won't show the file save dialog
+            if (!filename) {
+                filename = loadData.files[0] ? loadData.files[0].name : prompt('Enter filename');
+            }
+
+            let link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            link.click();
+
+            // Cleanup
+            URL.revokeObjectURL(link.href);
+        }
+
+        ////// Mermaid rendering //////
+        mermaid.initialize({ startOnLoad: false });
+        const drawDiagram = async function () {
+            const graphDefinition = editor.value;
+            try {
+                const { svg } = await mermaid.render('output', graphDefinition);
+                output.innerHTML = svg;
+            } catch (err) {
+                output.innerHTML = `<pre class="mermaidError">${err}</pre>`;
+            }
+        };
+        
+        editor.addEventListener('input', drawDiagram);
+        
+        // Additional controls
+        redraw.addEventListener('click', drawDiagram);
+
+        fullscreen.addEventListener('click', function() {
+            const svg = output.querySelector('svg');
+            const svgString = new XMLSerializer().serializeToString(svg);
+            const blob = new Blob([svgString], { type: 'image/svg+xml' });
+            const url = URL.createObjectURL(blob);
+            const win = window.open(url, '_blank');
+            win.document.write('<img src="' + url + '">');
+
+            // Cleanup
+            win.addEventListener('beforeunload', function(e) {
+                URL.revokeObjectURL(url);
+            });
+        });
+
+        ////// QOL //////
+
+        // Keybinds
+        window.addEventListener('keydown', function(e) {
+            if (e.ctrlKey && e.key === 'o') {
+                e.preventDefault(); // Prevent the default Open behavior
+                loadData.click();
+            } else if (e.ctrlKey && e.key === 's') {
+                e.preventDefault(); // Prevent the default save behavior
+                saveData.click();
+            }
+        }); 
+        // end keybinds
+
+        // Prevent accidental page close; also do cleanup
+        window.addEventListener('beforeunload', function(e) {
+            e.preventDefault();
+            e.returnValue = '';
+
+            // cleanup IndexedDB
+            window.indexedDB.deleteDatabase('moeDB');
+        });
+        
+        // Capture tab key inside textarea and convert to indentation
+        editor.addEventListener('keydown', function(e) {
+            if (e.key === 'Tab') {
+                e.preventDefault();
+                const start = editor.selectionStart;
+                const end = editor.selectionEnd;
+                const value = editor.value;
+                editor.value = value.substring(0, start) + '    ' + value.substring(end);
+                editor.selectionStart = editor.selectionEnd = start + 4;
+            }
+        });
+
+        ////// util //////
+        async function getIndexedDBItem(key) {
+            return new Promise((resolve, reject) => {
+                const request = window.indexedDB.open('moeDB');
+                request.onupgradeneeded = function(event) {
+                    const db = event.target.result;
+                    db.createObjectStore('moeStore');
+                };
+                request.onsuccess = function(event) {
+                    const db = event.target.result;
+                    const transaction = db.transaction('moeStore', 'readonly');
+                    const store = transaction.objectStore('moeStore');
+                    const getRequest = store.get(key);
+                    getRequest.onsuccess = function(event) {
+                        const item = event.target.result;
+                        resolve(item);
+                    };
+                    getRequest.onerror = function(event) {
+                        reject(event.target.error);
+                    };
+                };
+                request.onerror = function(event) {
+                    reject(event.target.error);
+                };
+            });
+        }
+
+        async function setIndexedDBItem(key, value) {
+            return new Promise((resolve, reject) => {
+                const request = window.indexedDB.open('moeDB');
+                request.onupgradeneeded = function(event) {
+                    const db = event.target.result;
+                    db.createObjectStore('moeStore');
+                };
+                request.onsuccess = function(event) {
+                    const db = event.target.result;
+                    const transaction = db.transaction('moeStore', 'readwrite');
+                    const store = transaction.objectStore('moeStore');
+                    const putRequest = store.put(value, key);
+                    putRequest.onsuccess = function(event) {
+                        resolve();
+                    };
+                    putRequest.onerror = function(event) {
+                        reject(event.target.error);
+                    };
+                };
+                request.onerror = function(event) {
+                    reject(event.target.error);
+                };
+            });
+        }
+
+        function guessFilename() {
+            if (loadData.files[0]) {
+                return loadData.files[0].name
+            } else if (document.getElementById('loadedFile').innerText !== 'No file chosen') {
+                return document.getElementById('loadedFile').innerText
+            } else {
+                return null;
+            }
+        }
+    </script>
+</body>
+</html>
