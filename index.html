@@ -9,10 +9,11 @@
             float: left;
         }
         .output {
-            width: 65%;
+            width: 64%;
             height: 100vh;
             float: left;
             overflow: auto;
+            margin: 0.5%;
         }
         .mermaidError {
             color: maroon;
@@ -55,6 +56,7 @@
     </div>
     <div class="output"></div>
     <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <script src="lib/svg-pan-zoom.min.js"></script>
     <script>
         let editor = document.getElementById('editor');
         let output = document.querySelector('.output');
@@ -141,8 +143,9 @@
 
             img.onload = function() {
                 const minSize = 300; // Minimum size for small diagrams
-                canvas.width = Math.max(img.width, minSize);
-                canvas.height = Math.max(img.height, minSize);
+                // the scale here is arbitrary, the goal is to force the output to be legible. Easier to downscale, amirite?
+                canvas.width = Math.max(img.width, minSize) * 3;
+                canvas.height = Math.max(img.height, minSize) * 3;
                 ctx.drawImage(img, 0, 0);
                 canvas.toBlob(function(blob) {
                     saveFile(blob, guessFilename(), 'png', e.shiftKey);
@@ -230,9 +233,18 @@
             try {
                 const { svg } = await mermaid.render('output', graphDefinition);
                 output.innerHTML = svg;
+
+                // enable pan and zoom via a library. Ideally I'd like to replace this with a local implementation
+                // quirks: the lib sets some stupid, stupid defaults that need to be eradicated with a cyber-axe
+                // this is why I prefer writing my own code and not using people's libraries: this also breaks `Fullscreen Diagram` functionality
+                let viewport = document.querySelector('.output svg')
+                svgPanZoom(viewport);
+                viewport.style.height = '100%';
+                viewport.style.maxWidth = null;
+            
             } catch (err) {
                 output.innerHTML = `<pre class="mermaidError">${err}</pre>`;
-            }
+            }          
         };
         
         editor.addEventListener('input', drawDiagram);
